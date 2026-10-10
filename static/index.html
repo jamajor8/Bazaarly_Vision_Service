@@ -1,115 +1,193 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Garment Scanner</title>
+<title>Garment scanner</title>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 0 auto; padding: 12px; }
-  video { width: 100%; border-radius: 8px; background: #000; }
-  #status { margin: 8px 0; font-weight: 600; }
-  .panel { border: 1px solid #ccc; border-radius: 8px; padding: 12px; margin-top: 12px; }
-  textarea { width: 100%; box-sizing: border-box; margin-bottom: 8px; }
-  img { max-width: 100%; border-radius: 6px; }
-  button { padding: 10px 16px; margin: 4px 4px 0 0; font-size: 1rem; }
-  .hidden { display: none; }
+  :root {
+    --page: #eceff0;
+    --panel: #ffffff;
+    --ink: #1c2220;
+    --muted: #5d6865;
+    --line: #cbd2cf;
+    --signal: #00c878;     /* same green as the garment highlight */
+    --busy: #d68a00;
+    --warn: #b4531a;
+    --error: #b3261e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0 auto; padding: 16px; max-width: 680px;
+    background: var(--page); color: var(--ink);
+    font: 16px/1.5 "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  }
+  h1 { margin: 0 0 12px; font-size: 1.25rem; font-weight: 650; letter-spacing: -0.01em; }
+  h2 { margin: 0 0 10px; font-size: 1.05rem; font-weight: 650; }
+
+  #stage { position: relative; overflow: hidden; border-radius: 12px; background: #0f1312; }
+  #video { display: block; width: 100%; min-height: 220px; }
+  #overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+
+  #statusbar { display: flex; align-items: center; gap: 10px; margin: 12px 0; min-height: 28px; }
+  #dot { flex: none; width: 12px; height: 12px; border-radius: 50%; background: var(--line); }
+  #statusbar[data-kind="ok"] #dot    { background: var(--signal); }
+  #statusbar[data-kind="busy"] #dot  { background: var(--busy); }
+  #statusbar[data-kind="warn"] #dot  { background: var(--warn); }
+  #statusbar[data-kind="error"] #dot { background: var(--error); }
+  #status { font-weight: 600; }
+
+  .panel {
+    margin-top: 14px; padding: 14px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  }
+  label { display: block; margin: 8px 0 4px; font-size: 0.9rem; color: var(--muted); }
+  textarea {
+    width: 100%; padding: 8px 10px; resize: vertical;
+    font: inherit; color: inherit; border: 1px solid var(--line); border-radius: 6px;
+  }
+  img.preview { display: block; max-width: 100%; max-height: 260px; margin: 0 0 8px; border-radius: 6px; background: #fff; }
+
+  button {
+    padding: 10px 16px; margin: 6px 6px 0 0;
+    font: inherit; font-weight: 600; color: var(--ink);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px; cursor: pointer;
+  }
+  button.primary { background: var(--signal); border-color: var(--signal); }
+  button:focus-visible, summary:focus-visible, input:focus-visible, textarea:focus-visible {
+    outline: 3px solid #1c6bff; outline-offset: 2px;
+  }
+  summary { cursor: pointer; font-weight: 600; }
+  #diagOut { margin-top: 10px; font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  .hidden { display: none !important; }
 </style>
 </head>
 <body>
-  <div id="stage" style="position:relative">
-  <video id="video" autoplay playsinline muted></video>
-  <canvas id="overlay" style="position:absolute; inset:0; width:100%; height:100%; pointer-events:none"></canvas>
-</div>
+<main>
+  <h1>Garment scanner</h1>
+
+  <div id="stage">
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="overlay"></canvas>
+  </div>
   <canvas id="canvas" class="hidden"></canvas>
-  <div id="status">Camera off</div>
-  <button id="start">Start scanning</button>
 
-  <div id="dup" class="panel hidden">
-    <p>This looks like an item you already scanned:</p>
-    <img id="dupImg" alt="">
+  <div id="statusbar" data-kind="idle"><span id="dot"></span><span id="status">Camera off</span></div>
+  <button id="start" class="primary">Start scanning</button>
+
+  <section id="dup" class="panel hidden">
+    <h2>You may have scanned this already</h2>
+    <img id="dupImg" class="preview" alt="Item scanned earlier">
     <p id="dupText"></p>
-    <button id="dupAdd">Different item, add it</button>
-    <button id="dupDismiss">Same item, ignore</button>
-  </div>
+    <button id="dupAdd">It's a different item. Add it</button>
+    <button id="dupDismiss">Same item. Ignore</button>
+  </section>
 
-  <div id="draft" class="panel hidden">
-    <h3>Review description</h3>
-    <img id="draftImg" alt="" style="max-height:240px; display:block; margin-bottom:8px">
-    <label>Overview</label>
+  <section id="draft" class="panel hidden">
+    <h2>Review the description</h2>
+    <img id="draftImg" class="preview" alt="Scanned garment">
+    <label for="overview">Overview</label>
     <textarea id="overview" rows="3"></textarea>
-    <label>Full description</label>
+    <label for="full">Full description</label>
     <textarea id="full" rows="10"></textarea>
-    <button id="approve">Approve</button>
+    <button id="approve" class="primary">Approve</button>
     <button id="discard">Discard</button>
-    <button id="retry" class="hidden">Retry</button>
-  </div>
+    <button id="retry" class="hidden">Retry description</button>
+  </section>
+
+  <details id="diag" class="panel">
+    <summary>Diagnostics</summary>
+    <button id="diagEcho">Test upload (echo)</button>
+    <button id="diagStatus">Server status</button>
+    <button id="diagCopy">Copy report</button>
+    <textarea id="diagOut" rows="14" readonly></textarea>
+  </details>
+</main>
 
 <script>
-  const SCAN_INTERVAL_MS = 1500;
-  const POLL_INTERVAL_MS = 1500;
-  const MAX_WIDTH = 1280;
+  // ---------- settings ----------
+  const SCAN_INTERVAL_MS = 1500;   // how often a full frame goes to /scan/frame
+  const POLL_INTERVAL_MS = 1500;   // how often to check whether a description is ready
+  const MAX_WIDTH = 1280;          // downscale full frames before sending
 
-  let sid = localStorage.getItem("sid");
-if (!sid) { sid = Math.random().toString(36).slice(2) + Date.now().toString(36); localStorage.setItem("sid", sid); }
-  let state = "idle";      // idle | scanning | duplicate | processing | review
+  const HL_INTERVAL_MS = 150;      // how often to ask the server for a fresh outline
+  const FILL_ALPHA = 0.05;         // green fill strength inside the garment (raise for stronger green)
+  const STALE_MS = 1500;           // hide the highlight if the server stops answering
+  const TW = 160;                  // tracking resolution (width); height follows the video
+  const SEARCH = 8;                // max motion per video frame, in tracking pixels
+  const STRIDE = 2;                // sample every 2nd pixel inside the garment
+  const MAX_ERR = 25;              // mean pixel difference above this = lost track, hold position
+
+  // ---------- session and state ----------
+  let sid = null;
+  try { sid = localStorage.getItem("sid"); } catch (e) {}
+  if (!sid) {
+    sid = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    try { localStorage.setItem("sid", sid); } catch (e) {}
+  }
+
+  let state = "idle";              // idle | scanning | duplicate | processing | review
   let busy = false;
   let pendingId = null, itemId = null, original = null;
 
   const $ = id => document.getElementById(id);
-  const setStatus = t => { $("status").textContent = t; };
   const show = (id, on) => $(id).classList.toggle("hidden", !on);
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const JSON_HDR = { "Content-Type": "application/json" };
 
-  async function api(path, opts) {
-    const r = await fetch(path, opts);
-    if (!r.ok) throw new Error(`${path} returned ${r.status}`);
-    return r.json();
+  function setStatus(text, kind = "ok") {
+    $("status").textContent = text;
+    $("statusbar").dataset.kind = kind;
   }
 
+  // ---------- API calls, with a request log for the diagnostics panel ----------
+  const diag = { requests: [], echo: null, status: null };
+
+  function logRequest(entry) {
+    diag.requests.unshift(entry);
+    diag.requests.length = Math.min(diag.requests.length, 15);
+    renderDiag();
+  }
+
+  function describeBody(body) {
+    if (body instanceof FormData) {
+      return [...body.entries()].map(([k, v]) => v instanceof Blob
+        ? { field: k, kind: "file", type: v.type, bytes: v.size }
+        : { field: k, kind: "text", value: String(v).slice(0, 40) });
+    }
+    return typeof body === "string" ? body.slice(0, 120) : null;
+  }
+
+  async function api(path, opts = {}) {
+    const t0 = performance.now();
+    const quiet = (opts.method || "GET") === "GET" && path.startsWith("/items/");   // skip polling noise
+    const entry = { time: new Date().toLocaleTimeString(), method: opts.method || "GET",
+                    path, sent: describeBody(opts.body) };
+    try {
+      const r = await fetch(path, opts);
+      const text = await r.text();
+      entry.status = r.status;
+      entry.ms = Math.round(performance.now() - t0);
+      entry.response = text.slice(0, 300);
+      if (!quiet || !r.ok) logRequest(entry);
+      if (!r.ok) throw new Error(`${path} returned ${r.status}: ${text.slice(0, 300)}`);
+      return JSON.parse(text);
+    } catch (e) {
+      if (!entry.status) { entry.error = String(e); logRequest(entry); }   // network failure
+      throw e;
+    }
+  }
+
+  // ---------- panels ----------
   function resetPanels() { show("dup", false); show("draft", false); clearHighlight(); }
 
   function resumeScanning(msg) {
     resetPanels();
     state = "scanning";
-    setStatus(msg || "Scanning... show an item");
+    setStatus(msg || "Scanning. Show an item", "ok");
   }
 
-  let hlTimer = null;
-
-function clearHighlight() {
-  const o = $("overlay");
-  o.getContext("2d").clearRect(0, 0, o.width, o.height);
-}
-
-function drawHighlight(hl) {
-  clearTimeout(hlTimer);
-  clearHighlight();
-  if (!hl) return;
-  const o = $("overlay"), v = $("video");
-  o.width = v.videoWidth; o.height = v.videoHeight;
-  const ctx = o.getContext("2d");
-
-  const img = new Image();
-  img.onload = () => {
-    ctx.clearRect(0, 0, o.width, o.height);
-    ctx.globalAlpha = 0.5;                       // raise for a stronger green
-    ctx.drawImage(img, 0, 0, o.width, o.height);
-    ctx.globalAlpha = 1;
-    // crisp outline on top
-    ctx.beginPath();
-    hl.outline.forEach(([x, y], i) =>
-      i ? ctx.lineTo(x * o.width, y * o.height) : ctx.moveTo(x * o.width, y * o.height));
-    ctx.closePath();
-    ctx.strokeStyle = "rgb(0, 200, 120)";
-    ctx.lineWidth = Math.max(3, o.width / 200);
-    ctx.stroke();
-  };
-  img.src = "data:image/png;base64," + hl.mask_png;
-  hlTimer = setTimeout(clearHighlight, 3000);    // drop stale highlights
-}
-
-  // ---------- capture ----------
+  // ---------- capture a full frame ----------
   function captureBlob() {
     const v = $("video"), c = $("canvas");
     const scale = Math.min(1, MAX_WIDTH / v.videoWidth);
@@ -126,43 +204,44 @@ function drawHighlight(hl) {
       const form = new FormData();
       form.append("session_id", sid);
       form.append("image", await captureBlob(), "frame.jpg");
-      handleScan(await api("/scan/frame", { method: "POST", body: form }));
+      const res = await api("/scan/frame", { method: "POST", body: form });
+      if (state === "scanning") handleScan(res);
     } catch (e) {
-      setStatus("Error: " + e.message);
+      setStatus("Error: " + e.message, "error");
     } finally {
       busy = false;
     }
   }
 
   function handleScan(res) {
-  drawHighlight(res.highlight);            // clears the overlay when there is none
-  switch (res.result) {
-    case "new_item":
-    case "awaiting_approval":
-      startProcessing(res.item_id); break;
-    case "duplicate_pending":
-      showDuplicate(res.pending_id, res.existing_item); break;
-    case "awaiting_user":
-      showDuplicate(res.pending_id, null); break;
-    case "rejected":
-      setStatus("Too blurry, hold the item steady"); break;
-    case "no_garment":
-      setStatus("No garment detected. Hold one up to the camera"); break;
-    case "suppressed":
-      setStatus("Same item still in view (already scanned)"); break;
-    default:
-      setStatus("Scanning... show an item");
+    switch (res.result) {
+      case "new_item":
+      case "awaiting_approval":      // e.g. the page was reloaded mid-review
+        startProcessing(res.item_id); break;
+      case "duplicate_pending":
+        showDuplicate(res.pending_id, res.existing_item); break;
+      case "awaiting_user":
+        showDuplicate(res.pending_id, null); break;
+      case "rejected":
+        setStatus("Too blurry. Hold the item steady", "warn"); break;
+      case "no_garment":
+        setStatus("No garment detected. Hold one up to the camera", "warn"); break;
+      case "suppressed":
+        setStatus("Same item still in view (already scanned)", "ok"); break;
+      default:                       // cooldown
+        setStatus("Scanning. Show an item", "ok");
+    }
   }
-}
 
   // ---------- duplicate prompt ----------
   function showDuplicate(pid, existing) {
     state = "duplicate";
     pendingId = pid;
     $("dupImg").src = existing ? existing.image_url : "";
+    show("dupImg", !!existing);
     $("dupText").textContent = (existing && existing.overview) || "";
     show("dup", true);
-    setStatus("Possible duplicate");
+    setStatus("Possible duplicate. Choose an option below", "warn");
   }
 
   async function resolveDup(action) {
@@ -172,24 +251,24 @@ function drawHighlight(hl) {
       show("dup", false);
       if (res.result === "new_item") startProcessing(res.item_id);
       else resumeScanning();
-    } catch (e) { setStatus("Error: " + e.message); }
+    } catch (e) { setStatus("Error: " + e.message, "error"); }
   }
   $("dupAdd").onclick = () => resolveDup("add");
   $("dupDismiss").onclick = () => resolveDup("dismiss");
 
-  // ---------- description + review ----------
+  // ---------- description and review ----------
   async function startProcessing(id) {
     resetPanels();
     state = "processing";
     itemId = id;
-    setStatus("Describing item...");
+    setStatus("Describing the item...", "busy");
     while (state === "processing") {
       try {
         const item = await api(`/items/${itemId}`);
         if (item.status === "ready") return showDraft(item);
         if (item.status === "error") return showError(item);
         if (item.status !== "processing") return resumeScanning();
-      } catch (e) { setStatus("Error: " + e.message); }
+      } catch (e) { setStatus("Error: " + e.message, "error"); }
       await sleep(POLL_INTERVAL_MS);
     }
   }
@@ -201,14 +280,15 @@ function drawHighlight(hl) {
     $("full").value = original.full_description;
     $("draftImg").src = `/items/${itemId}/image/0?t=${Date.now()}`;
     show("approve", true); show("retry", false); show("draft", true);
-    setStatus("Review the description, then approve");
+    setStatus("Review the description, then approve", "ok");
   }
 
   function showError(item) {
     state = "review";
     $("overview").value = ""; $("full").value = "";
+    $("draftImg").src = `/items/${itemId}/image/0?t=${Date.now()}`;
     show("approve", false); show("retry", true); show("draft", true);
-    setStatus("Description failed: " + item.error);
+    setStatus("Description failed: " + item.error, "error");
   }
 
   $("approve").onclick = async () => {
@@ -220,30 +300,265 @@ function drawHighlight(hl) {
         await api(`/items/${itemId}`, { method: "PATCH", headers: JSON_HDR, body: JSON.stringify(edits) });
       await api(`/items/${itemId}/approve`, { method: "POST" });
       resumeScanning("Approved. Show the next item");
-    } catch (e) { setStatus("Error: " + e.message); }
+    } catch (e) { setStatus("Error: " + e.message, "error"); }
   };
 
   $("discard").onclick = async () => {
     try {
       await api(`/items/${itemId}/discard`, { method: "POST" });
       resumeScanning("Discarded. Show the next item");
-    } catch (e) { setStatus("Error: " + e.message); }
+    } catch (e) { setStatus("Error: " + e.message, "error"); }
   };
 
   $("retry").onclick = async () => {
     try {
       await api(`/items/${itemId}/retry`, { method: "POST" });
       startProcessing(itemId);
-    } catch (e) { setStatus("Error: " + e.message); }
+    } catch (e) { setStatus("Error: " + e.message, "error"); }
   };
 
-  // ---------- start / stop ----------
+  // ---------- live highlight: server keyframes + per-frame tracking in the browser ----------
+  let TH = 120;
+
+  // cumX/cumY = total motion measured so far (tracking px). anchor = cum at the moment the
+  // keyframe's source frame was captured, so (cum - anchor) = motion since that frame.
+  const trk = { prev: null, pts: null, hl: null, cumX: 0, cumY: 0, anchorX: 0, anchorY: 0 };
+
+  const hlCanvas = document.createElement("canvas");   // frames sent to the server
+  const tCanvas = document.createElement("canvas");    // frames for tracking
+  const tCtx = tCanvas.getContext("2d", { willReadFrequently: true });
+  const rCanvas = document.createElement("canvas");    // used to rasterize the outline
+  const rCtx = rCanvas.getContext("2d", { willReadFrequently: true });
+  const SAD = new Float64Array((2 * SEARCH + 1) ** 2);
+  let hlBusy = false;
+
+  function syncTH() {
+    const v = $("video");
+    TH = Math.max(1, Math.round(TW * v.videoHeight / v.videoWidth));
+  }
+
+  function clearHighlight() {
+    trk.hl = null; trk.pts = null; trk.prev = null;
+    const o = $("overlay");
+    o.getContext("2d").clearRect(0, 0, o.width, o.height);
+  }
+
+  // small grayscale copy of the current video frame
+  function grabGray() {
+    syncTH();
+    if (tCanvas.width !== TW || tCanvas.height !== TH) {
+      tCanvas.width = TW; tCanvas.height = TH; trk.prev = null;
+    }
+    tCtx.drawImage($("video"), 0, 0, TW, TH);
+    const d = tCtx.getImageData(0, 0, TW, TH).data;
+    const g = new Uint8Array(TW * TH);
+    for (let i = 0, j = 0; i < d.length; i += 4, j++) g[j] = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
+    return g;
+  }
+
+  // list of (x, y) pixels inside the garment outline, at tracking resolution
+  function rasterize(outline) {
+    rCanvas.width = TW; rCanvas.height = TH;
+    rCtx.clearRect(0, 0, TW, TH);
+    rCtx.fillStyle = "#000";
+    rCtx.beginPath();
+    outline.forEach(([x, y], i) => i ? rCtx.lineTo(x * TW, y * TH) : rCtx.moveTo(x * TW, y * TH));
+    rCtx.closePath();
+    rCtx.fill();
+    const a = rCtx.getImageData(0, 0, TW, TH).data;
+    const pts = [];
+    for (let y = 0; y < TH; y += STRIDE)
+      for (let x = 0; x < TW; x += STRIDE)
+        if (a[(y * TW + x) * 4 + 3] > 128) pts.push(x, y);
+    return Int32Array.from(pts);
+  }
+
+  // how far did the garment move between prev and cur? (block matching with sub-pixel refinement)
+  function estimateShift(prev, cur, pts, offX, offY) {
+    const S = SEARCH, n = 2 * S + 1;
+    const ox = Math.round(offX), oy = Math.round(offY);   // where the garment is in prev right now
+    SAD.fill(0);
+    let used = 0;
+    for (let i = 0; i < pts.length; i += 2) {
+      const px = pts[i] + ox, py = pts[i + 1] + oy;
+      if (px < S || py < S || px >= TW - S || py >= TH - S) continue;
+      const pv = prev[py * TW + px];
+      used++;
+      for (let dy = -S; dy <= S; dy++) {
+        const row = (py + dy) * TW + px;
+        const base = (dy + S) * n + S;
+        for (let dx = -S; dx <= S; dx++) {
+          const d = cur[row + dx] - pv;
+          SAD[base + dx] += d < 0 ? -d : d;
+        }
+      }
+    }
+    if (used < 40) return null;
+
+    // small penalty on big shifts, so flat (textureless) regions resolve to "no motion"
+    let best = Infinity, bx = 0, by = 0;
+    for (let y = -S; y <= S; y++) {
+      for (let x = -S; x <= S; x++) {
+        const k = (y + S) * n + x + S;
+        SAD[k] += used * 0.02 * (x * x + y * y);
+        if (SAD[k] < best) { best = SAD[k]; bx = x; by = y; }
+      }
+    }
+    const at = (x, y) => SAD[(y + S) * n + x + S];
+    let sx = 0, sy = 0;
+    if (bx > -S && bx < S) {
+      const a = at(bx - 1, by), c = at(bx + 1, by), den = a - 2 * best + c;
+      if (den > 0) sx = (a - c) / (2 * den);
+    }
+    if (by > -S && by < S) {
+      const a = at(bx, by - 1), c = at(bx, by + 1), den = a - 2 * best + c;
+      if (den > 0) sy = (a - c) / (2 * den);
+    }
+    const err = (best - used * 0.02 * (bx * bx + by * by)) / used;
+    return { dx: bx + sx, dy: by + sy, err };
+  }
+
+  // a fresh outline arrived from the server
+  function setKeyframe(hl, sentX, sentY) {
+    if (!hl) return clearHighlight();
+    syncTH();
+    const img = new Image();
+    img.src = "data:image/png;base64," + hl.mask_png;
+    trk.hl = { outline: hl.outline, img, at: performance.now() };
+    trk.anchorX = sentX; trk.anchorY = sentY;   // motion since the frame was sent is applied automatically
+    trk.pts = rasterize(hl.outline);
+  }
+
+  function renderHighlight() {
+    const o = $("overlay"), v = $("video");
+    if (o.width !== v.videoWidth || o.height !== v.videoHeight) { o.width = v.videoWidth; o.height = v.videoHeight; }
+    const ctx = o.getContext("2d");
+    ctx.clearRect(0, 0, o.width, o.height);
+    const k = trk.hl;
+    if (!k || performance.now() - k.at > STALE_MS) return;
+
+    const sx = (trk.cumX - trk.anchorX) / TW * o.width;    // tracked motion since the keyframe
+    const sy = (trk.cumY - trk.anchorY) / TH * o.height;
+    if (k.img.complete && k.img.naturalWidth) {
+      ctx.globalAlpha = FILL_ALPHA;
+      ctx.drawImage(k.img, sx, sy, o.width, o.height);
+      ctx.globalAlpha = 1;
+    }
+    ctx.beginPath();
+    k.outline.forEach(([x, y], i) => {
+      const px = x * o.width + sx, py = y * o.height + sy;
+      i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+    });
+    ctx.closePath();
+    ctx.strokeStyle = "rgb(0, 200, 120)";
+    ctx.lineWidth = Math.max(3, o.width / 200);
+    ctx.stroke();
+  }
+
+  // runs once per new video frame (requestVideoFrameCallback), falling back to requestAnimationFrame
+  function trackLoop() {
+    const v = $("video");
+    const next = cb => (v.requestVideoFrameCallback ? v.requestVideoFrameCallback(cb) : requestAnimationFrame(cb));
+    const step = () => {
+      if (state !== "scanning") {
+        if (trk.hl) clearHighlight();
+      } else if (v.videoWidth && trk.pts) {
+        const cur = grabGray();
+        if (trk.prev) {
+          const m = estimateShift(trk.prev, cur, trk.pts, trk.cumX - trk.anchorX, trk.cumY - trk.anchorY);
+          if (m && m.err < MAX_ERR) { trk.cumX += m.dx; trk.cumY += m.dy; }
+        }
+        trk.prev = cur;
+        renderHighlight();
+      }
+      next(step);
+    };
+    next(step);
+  }
+
+  // slow loop: ask the server for a fresh outline
+  async function highlightTick() {
+    const v = $("video");
+    if (state !== "scanning" || hlBusy || !v.videoWidth) return;
+    hlBusy = true;
+    try {
+      const w = 320, h = Math.round(w * v.videoHeight / v.videoWidth);
+      hlCanvas.width = w; hlCanvas.height = h;
+      hlCanvas.getContext("2d").drawImage(v, 0, 0, w, h);
+      const sentX = trk.cumX, sentY = trk.cumY;   // tracker position at the moment this frame was captured
+      const blob = await new Promise(r => hlCanvas.toBlob(r, "image/jpeg", 0.6));
+      const form = new FormData();
+      form.append("image", blob, "f.jpg");
+      const res = await fetch("/scan/highlight", { method: "POST", body: form });   // plain fetch keeps the log readable
+      if (res.ok && state === "scanning") setKeyframe((await res.json()).highlight, sentX, sentY);
+    } catch (e) { /* the next tick retries */ }
+    finally { hlBusy = false; }
+  }
+
+  // ---------- diagnostics panel ----------
+  function envInfo() {
+    const v = $("video");
+    return {
+      origin: location.origin,
+      secureContext: window.isSecureContext,
+      hasMediaDevices: !!navigator.mediaDevices,
+      browser: navigator.userAgent,
+      sessionId: sid,
+      pageState: state,
+      video: v.videoWidth ? `${v.videoWidth}x${v.videoHeight}` : "no video",
+    };
+  }
+
+  function renderDiag() {
+    $("diagOut").value = JSON.stringify(
+      { env: envInfo(), echo: diag.echo, serverStatus: diag.status, recentRequests: diag.requests }, null, 2);
+  }
+
+  $("diagEcho").onclick = async () => {
+    const form = new FormData();
+    form.append("session_id", sid);
+    if ($("video").videoWidth) {
+      form.append("image", await captureBlob(), "frame.jpg");
+    } else {                                   // no camera running: send a tiny generated image
+      const c = document.createElement("canvas");
+      c.width = c.height = 64;
+      c.getContext("2d").fillRect(0, 0, 64, 64);
+      form.append("image", await new Promise(r => c.toBlob(r, "image/jpeg")), "test.jpg");
+    }
+    try { diag.echo = await api("/debug/echo", { method: "POST", body: form }); }
+    catch (e) { diag.echo = { error: String(e) }; }
+    renderDiag();
+  };
+
+  $("diagStatus").onclick = async () => {
+    try { diag.status = await api("/debug/status"); }
+    catch (e) { diag.status = { error: String(e) }; }
+    renderDiag();
+  };
+
+  $("diagCopy").onclick = async () => {
+    renderDiag();
+    const out = $("diagOut");
+    out.select();
+    try { await navigator.clipboard.writeText(out.value); } catch (e) { document.execCommand("copy"); }
+    $("diagCopy").textContent = "Copied";
+    setTimeout(() => { $("diagCopy").textContent = "Copy report"; }, 1500);
+  };
+
+  // ---------- start / pause ----------
   $("start").onclick = async () => {
     if (state === "scanning") {
-      state = "idle"; $("start").textContent = "Start scanning"; setStatus("Paused");
+      state = "idle";
+      clearHighlight();
+      $("start").textContent = "Start scanning";
+      setStatus("Paused", "idle");
       return;
     }
     if (state !== "idle") return;
+    if (!navigator.mediaDevices) {
+      setStatus("The camera needs https or http://localhost:8000. Open the page at localhost, not 0.0.0.0", "error");
+      return;
+    }
     try {
       if (!$("video").srcObject) {
         $("video").srcObject = await navigator.mediaDevices.getUserMedia({
@@ -251,10 +566,14 @@ function drawHighlight(hl) {
       }
       $("start").textContent = "Pause";
       resumeScanning();
-    } catch (e) { setStatus("Camera error: " + e.message); }
+    } catch (e) { setStatus("Camera error: " + e.message, "error"); }
   };
 
+  // ---------- go ----------
   setInterval(scanTick, SCAN_INTERVAL_MS);
+  setInterval(highlightTick, HL_INTERVAL_MS);
+  trackLoop();
+  renderDiag();
 </script>
 </body>
 </html>

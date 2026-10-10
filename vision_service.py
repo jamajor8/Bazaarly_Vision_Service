@@ -103,7 +103,12 @@ class Sections(BaseModel):
 
 
 class Description(BaseModel):
+    short_title: str = Field(description="2-6 word title")
+    main_colors: list[str] = Field(description="domanant colors in the item")
+    search_text: list[str] = Field(description="various keywords that could be used to search up the item in a database")
+    garment_type: str = Field(description="categorize the garment. Ex: shoe, jacket, shirt.")
     overview: str = Field(description="2-3 sentence summary")
+    price: str = Field(description="Estemate price of garment based on condition, brand, material, and profit margin")
     sections: Sections
     full_description: str = Field(description="Exhaustive ordered prose covering everything in the sections")
     not_visible: list[str] = Field(description="Parts of the garment not shown in any image")
@@ -171,7 +176,7 @@ def segment(img: Image.Image):
     outline = [[float(p[0][0]) / sw, float(p[0][1]) / sh] for p in c]
     x, y, w, h = cv2.boundingRect(binary)
     highlight = {"bbox": [x / sw, y / sh, w / sw, h / sh], "outline": outline}
-    
+
         # green layer for the camera overlay: full frame, 256px wide, opaque only where the garment is
     mw = 256
     mh = max(1, round(mw * sh / sw))
@@ -269,6 +274,43 @@ class Resolution(BaseModel):
 
 
 # ---------- endpoints ----------
+fast_session = new_session("u2netp")   # runs at 320px internally, much faster than isnet for live use
+
+
+def segment_fast(img: Image.Image):
+    """Quick outline + green layer for the live overlay. Returns a highlight dict or None."""
+    small = img.copy()
+    small.thumbnail((320, 320))
+    sw, sh = small.size
+    mask = np.array(remove(small, session=fast_session, only_mask=True))
+    binary = (mask > 128).astype(np.uint8)
+
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(binary)
+    if n <= 1:
+        return None
+    biggest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    binary = (labels == biggest).astype(np.uint8)
+    if binary.mean() < MIN_GARMENT_AREA:
+        return None
+
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    c = max(contours, key=cv2.contourArea)
+    c = cv2.approxPolyDP(c, 0.004 * cv2.arcLength(c, True), True)
+    outline = [[float(p[0][0]) / sw, float(p[0][1]) / sh] for p in c]
+
+    mw = 128                                   # small green layer, stretched over the video
+    mh = max(1, round(mw * sh / sw))
+    layer = Image.new("RGBA", (mw, mh), (0, 200, 120, 255))
+    layer.putalpha(Image.fromarray(binary * 255).resize((mw, mh), Image.BILINEAR))
+    buf = io.BytesIO()
+    layer.save(buf, "PNG")
+    return {"outline": outline, "mask_png": base64.b64encode(buf.getvalue()).decode()}
+
+
+@app.post("/scan/highlight")
+def scan_highlight(image: UploadFile = File(...)):
+    img = to_pil(image.file.read())
+    return {"highlight": segment_fast(img)}    # null when no garment is in view
 @app.post("/scan/frame")
 def scan_frame(background: BackgroundTasks, session_id: str = Form(...), image: UploadFile = File(...)):
     # One item at a time: ignore frames while a draft is being reviewed.
