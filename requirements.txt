@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+python-multipart
+google-genai
+pydantic
+pillow
+pillow-heif
+opencv-python-headless
+sentence-transformers
