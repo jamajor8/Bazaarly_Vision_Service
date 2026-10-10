@@ -31,6 +31,33 @@ from PIL import Image
 from pillow_heif import register_heif_opener
 from pydantic import BaseModel, Field
 from sentence_transformers import SentenceTransformer
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI(title="Bizzarly Vision Service")
+
+from fastapi import Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(RequestValidationError)
+async def log_validation_error(request: Request, exc: RequestValidationError):
+    problems = [{"loc": e["loc"], "msg": e["msg"]} for e in exc.errors()]
+    print("422", request.url.path, request.headers.get("content-type"), problems)
+    return JSONResponse(status_code=422, content={"detail": problems})
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],         # Allows any website to access your API
+    allow_credentials=False,     # Must be False when using "*"
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+from rembg import remove, new_session
+
+seg_session = new_session("isnet-general-use")   # "u2netp" is smaller and faster, but rougher edges
+MIN_GARMENT_AREA = 0.04                          # garment must fill at least 4% of the frame
 
 # Model name is a setting: if Google retires or renames it, change GEMINI_MODEL, not the code.
 # Check AI Studio for the names available on your key's free tier.
@@ -41,7 +68,7 @@ DUP_THRESHOLD = 0.92     # cosine similarity; tune with same-item vs similar-ite
 
 client = genai.Client()   # reads GEMINI_API_KEY (or GOOGLE_API_KEY) from the environment
 embedder = SentenceTransformer("clip-ViT-B-32")
-app = FastAPI(title="Garment Vision Service")
+
 
 ITEMS: dict[str, dict] = {}
 SESSION_EMB: dict[str, list[tuple[str, np.ndarray]]] = {}
@@ -91,6 +118,7 @@ Rules:
 - Give counts, positions (e.g. 'about 3 inches below the left shoulder seam'), relative sizes, pattern direction,
   thread colors, and exact colors in plain words.
 - Transcribe any visible text exactly, in quotes.
+- Describe and visible known logos or brands.
 - Describe flaws with location and approximate size.
 - Observation only. No subjective or marketing words (vintage, stylish, high quality). Do NOT guess brand, era,
   fiber content, or value. Only mention a brand if it is literally printed on the garment, and say so as transcription.
@@ -117,6 +145,50 @@ def blur_score(img: Image.Image) -> float:
     small.thumbnail((640, 640))
     gray = cv2.cvtColor(np.array(small), cv2.COLOR_RGB2GRAY)
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+def segment(img: Image.Image):
+    """Returns (cutout_on_white, highlight) or None if no garment-sized object is found.
+    highlight = {"bbox": [x, y, w, h], "outline": [[x, y], ...]} with coordinates 0-1 of the original frame."""
+    small = img.copy()
+    small.thumbnail((640, 640))
+    sw, sh = small.size
+    mask = np.array(remove(small, session=seg_session, only_mask=True))
+    binary = (mask > 128).astype(np.uint8)
+
+    # keep only the largest blob, so stray specks don't count
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(binary)
+    if n <= 1:
+        return None
+    biggest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    binary = (labels == biggest).astype(np.uint8)
+    if binary.mean() < MIN_GARMENT_AREA:
+        return None
+
+    # outline for the highlight
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    c = max(contours, key=cv2.contourArea)
+    c = cv2.approxPolyDP(c, 0.003 * cv2.arcLength(c, True), True)
+    outline = [[float(p[0][0]) / sw, float(p[0][1]) / sh] for p in c]
+    x, y, w, h = cv2.boundingRect(binary)
+    highlight = {"bbox": [x / sw, y / sh, w / sw, h / sh], "outline": outline}
+    
+        # green layer for the camera overlay: full frame, 256px wide, opaque only where the garment is
+    mw = 256
+    mh = max(1, round(mw * sh / sw))
+    layer = Image.new("RGBA", (mw, mh), (0, 200, 120, 255))
+    layer.putalpha(Image.fromarray(binary * 255).resize((mw, mh), Image.BILINEAR))
+    buf = io.BytesIO()
+    layer.save(buf, "PNG")
+    highlight["mask_png"] = base64.b64encode(buf.getvalue()).decode()
+
+    # cutout at full resolution: garment on a white background, cropped to the garment
+    W, H = img.size
+    alpha = Image.fromarray(binary * 255).resize((W, H), Image.BILINEAR)
+    cut = Image.composite(img, Image.new("RGB", (W, H), "white"), alpha)
+    pad = 0.03
+    box = (max(0, int((x / sw - pad) * W)), max(0, int((y / sh - pad) * H)),
+           min(W, int(((x + w) / sw + pad) * W)), min(H, int(((y + h) / sh + pad) * H)))
+    return cut.crop(box), highlight
 
 
 def b64(img: Image.Image, max_side: int = 1568) -> str:
@@ -198,18 +270,24 @@ class Resolution(BaseModel):
 
 # ---------- endpoints ----------
 @app.post("/scan/frame")
-async def scan_frame(background: BackgroundTasks, session_id: str = Form(...), image: UploadFile = File(...)):
+def scan_frame(background: BackgroundTasks, session_id: str = Form(...), image: UploadFile = File(...)):
     # One item at a time: ignore frames while a draft is being reviewed.
     if session_id in ACTIVE:
         return {"result": "awaiting_approval", "item_id": ACTIVE[session_id]}
     if COOLDOWN.get(session_id, 0) > time.time():
         return {"result": "cooldown"}
 
-    img = to_pil(await image.read())
+    img = to_pil(image.file.read())
 
     score = blur_score(img)
     if score < BLUR_MIN:
         return {"result": "rejected", "reason": "blurry", "blur_score": score}
+
+    # NEW: find the garment; from here on img is the cutout on white
+    seg = segment(img)
+    if seg is None:
+        return {"result": "no_garment"}
+    img, highlight = seg
 
     vec = embed(img)
     best_id, best_sim = None, 0.0
@@ -220,10 +298,12 @@ async def scan_frame(background: BackgroundTasks, session_id: str = Form(...), i
     if best_id and best_sim >= DUP_THRESHOLD:
         # A question is already open for this session: don't spawn another one.
         if session_id in SESSION_PENDING:
-            return {"result": "awaiting_user", "pending_id": SESSION_PENDING[session_id]}
+            return {"result": "awaiting_user", "pending_id": SESSION_PENDING[session_id],
+                    "highlight": highlight}                                   # NEW
         # Vendor recently answered about this item and it's probably still in view.
         if SUPPRESS.get((session_id, best_id), 0) > time.time():
-            return {"result": "suppressed", "possible_duplicate_of": best_id}
+            return {"result": "suppressed", "possible_duplicate_of": best_id,
+                    "highlight": highlight}                                   # NEW
 
         pending_id = str(uuid.uuid4())
         path = DATA / f"pending_{pending_id}.jpg"
@@ -234,6 +314,7 @@ async def scan_frame(background: BackgroundTasks, session_id: str = Form(...), i
         existing = ITEMS[best_id]
         return {"result": "duplicate_pending", "pending_id": pending_id,
                 "similarity": best_sim,
+                "highlight": highlight,                                       # NEW
                 "existing_item": {
                     "item_id": best_id,
                     "image_url": f"/items/{best_id}/image/0",
@@ -241,8 +322,8 @@ async def scan_frame(background: BackgroundTasks, session_id: str = Form(...), i
 
     item = create_item(session_id, img, vec, background,
                        duplicate_of=best_id if best_sim > 0.8 else None)
-    return {"result": "new_item", "item_id": item["item_id"], "status": "processing"}
-
+    return {"result": "new_item", "item_id": item["item_id"], "status": "processing",
+            "highlight": highlight}                                           # NEW
 
 @app.post("/scan/pending/{pending_id}/resolve")
 def resolve_pending(pending_id: str, body: Resolution, background: BackgroundTasks):
@@ -387,3 +468,7 @@ def list_items(session_id: Optional[str] = None, status: Optional[str] = None):
     return [i for i in ITEMS.values()
             if (session_id is None or i["session_id"] == session_id)
             and (status is None or i["status"] == status)]
+
+@app.get("/")
+def index():
+    return FileResponse("static/index.html")

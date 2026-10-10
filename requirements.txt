@@ -7,3 +7,5 @@ pillow
 pillow-heif
 opencv-python-headless
 sentence-transformers
+rembg[cpu]
+

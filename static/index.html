@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Garment Scanner</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 0 auto; padding: 12px; }
+  video { width: 100%; border-radius: 8px; background: #000; }
+  #status { margin: 8px 0; font-weight: 600; }
+  .panel { border: 1px solid #ccc; border-radius: 8px; padding: 12px; margin-top: 12px; }
+  textarea { width: 100%; box-sizing: border-box; margin-bottom: 8px; }
+  img { max-width: 100%; border-radius: 6px; }
+  button { padding: 10px 16px; margin: 4px 4px 0 0; font-size: 1rem; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+  <div id="stage" style="position:relative">
+  <video id="video" autoplay playsinline muted></video>
+  <canvas id="overlay" style="position:absolute; inset:0; width:100%; height:100%; pointer-events:none"></canvas>
+</div>
+  <canvas id="canvas" class="hidden"></canvas>
+  <div id="status">Camera off</div>
+  <button id="start">Start scanning</button>
+
+  <div id="dup" class="panel hidden">
+    <p>This looks like an item you already scanned:</p>
+    <img id="dupImg" alt="">
+    <p id="dupText"></p>
+    <button id="dupAdd">Different item, add it</button>
+    <button id="dupDismiss">Same item, ignore</button>
+  </div>
+
+  <div id="draft" class="panel hidden">
+    <h3>Review description</h3>
+    <img id="draftImg" alt="" style="max-height:240px; display:block; margin-bottom:8px">
+    <label>Overview</label>
+    <textarea id="overview" rows="3"></textarea>
+    <label>Full description</label>
+    <textarea id="full" rows="10"></textarea>
+    <button id="approve">Approve</button>
+    <button id="discard">Discard</button>
+    <button id="retry" class="hidden">Retry</button>
+  </div>
+
+<script>
+  const SCAN_INTERVAL_MS = 1500;
+  const POLL_INTERVAL_MS = 1500;
+  const MAX_WIDTH = 1280;
+
+  let sid = localStorage.getItem("sid");
+if (!sid) { sid = Math.random().toString(36).slice(2) + Date.now().toString(36); localStorage.setItem("sid", sid); }
+  let state = "idle";      // idle | scanning | duplicate | processing | review
+  let busy = false;
+  let pendingId = null, itemId = null, original = null;
+
+  const $ = id => document.getElementById(id);
+  const setStatus = t => { $("status").textContent = t; };
+  const show = (id, on) => $(id).classList.toggle("hidden", !on);
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const JSON_HDR = { "Content-Type": "application/json" };
+
+  async function api(path, opts) {
+    const r = await fetch(path, opts);
+    if (!r.ok) throw new Error(`${path} returned ${r.status}`);
+    return r.json();
+  }
+
+  function resetPanels() { show("dup", false); show("draft", false); clearHighlight(); }
+
+  function resumeScanning(msg) {
+    resetPanels();
+    state = "scanning";
+    setStatus(msg || "Scanning... show an item");
+  }
+
+  let hlTimer = null;
+
+function clearHighlight() {
+  const o = $("overlay");
+  o.getContext("2d").clearRect(0, 0, o.width, o.height);
+}
+
+function drawHighlight(hl) {
+  clearTimeout(hlTimer);
+  clearHighlight();
+  if (!hl) return;
+  const o = $("overlay"), v = $("video");
+  o.width = v.videoWidth; o.height = v.videoHeight;
+  const ctx = o.getContext("2d");
+
+  const img = new Image();
+  img.onload = () => {
+    ctx.clearRect(0, 0, o.width, o.height);
+    ctx.globalAlpha = 0.5;                       // raise for a stronger green
+    ctx.drawImage(img, 0, 0, o.width, o.height);
+    ctx.globalAlpha = 1;
+    // crisp outline on top
+    ctx.beginPath();
+    hl.outline.forEach(([x, y], i) =>
+      i ? ctx.lineTo(x * o.width, y * o.height) : ctx.moveTo(x * o.width, y * o.height));
+    ctx.closePath();
+    ctx.strokeStyle = "rgb(0, 200, 120)";
+    ctx.lineWidth = Math.max(3, o.width / 200);
+    ctx.stroke();
+  };
+  img.src = "data:image/png;base64," + hl.mask_png;
+  hlTimer = setTimeout(clearHighlight, 3000);    // drop stale highlights
+}
+
+  // ---------- capture ----------
+  function captureBlob() {
+    const v = $("video"), c = $("canvas");
+    const scale = Math.min(1, MAX_WIDTH / v.videoWidth);
+    c.width = v.videoWidth * scale;
+    c.height = v.videoHeight * scale;
+    c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+    return new Promise(r => c.toBlob(r, "image/jpeg", 0.9));
+  }
+
+  async function scanTick() {
+    if (state !== "scanning" || busy || !$("video").videoWidth) return;
+    busy = true;   // never overlap requests
+    try {
+      const form = new FormData();
+      form.append("session_id", sid);
+      form.append("image", await captureBlob(), "frame.jpg");
+      handleScan(await api("/scan/frame", { method: "POST", body: form }));
+    } catch (e) {
+      setStatus("Error: " + e.message);
+    } finally {
+      busy = false;
+    }
+  }
+
+  function handleScan(res) {
+  drawHighlight(res.highlight);            // clears the overlay when there is none
+  switch (res.result) {
+    case "new_item":
+    case "awaiting_approval":
+      startProcessing(res.item_id); break;
+    case "duplicate_pending":
+      showDuplicate(res.pending_id, res.existing_item); break;
+    case "awaiting_user":
+      showDuplicate(res.pending_id, null); break;
+    case "rejected":
+      setStatus("Too blurry, hold the item steady"); break;
+    case "no_garment":
+      setStatus("No garment detected. Hold one up to the camera"); break;
+    case "suppressed":
+      setStatus("Same item still in view (already scanned)"); break;
+    default:
+      setStatus("Scanning... show an item");
+  }
+}
+
+  // ---------- duplicate prompt ----------
+  function showDuplicate(pid, existing) {
+    state = "duplicate";
+    pendingId = pid;
+    $("dupImg").src = existing ? existing.image_url : "";
+    $("dupText").textContent = (existing && existing.overview) || "";
+    show("dup", true);
+    setStatus("Possible duplicate");
+  }
+
+  async function resolveDup(action) {
+    try {
+      const res = await api(`/scan/pending/${pendingId}/resolve`,
+        { method: "POST", headers: JSON_HDR, body: JSON.stringify({ action }) });
+      show("dup", false);
+      if (res.result === "new_item") startProcessing(res.item_id);
+      else resumeScanning();
+    } catch (e) { setStatus("Error: " + e.message); }
+  }
+  $("dupAdd").onclick = () => resolveDup("add");
+  $("dupDismiss").onclick = () => resolveDup("dismiss");
+
+  // ---------- description + review ----------
+  async function startProcessing(id) {
+    resetPanels();
+    state = "processing";
+    itemId = id;
+    setStatus("Describing item...");
+    while (state === "processing") {
+      try {
+        const item = await api(`/items/${itemId}`);
+        if (item.status === "ready") return showDraft(item);
+        if (item.status === "error") return showError(item);
+        if (item.status !== "processing") return resumeScanning();
+      } catch (e) { setStatus("Error: " + e.message); }
+      await sleep(POLL_INTERVAL_MS);
+    }
+  }
+
+  function showDraft(item) {
+    state = "review";
+    original = { overview: item.descriptions.overview, full_description: item.descriptions.full_description };
+    $("overview").value = original.overview;
+    $("full").value = original.full_description;
+    $("draftImg").src = `/items/${itemId}/image/0?t=${Date.now()}`;
+    show("approve", true); show("retry", false); show("draft", true);
+    setStatus("Review the description, then approve");
+  }
+
+  function showError(item) {
+    state = "review";
+    $("overview").value = ""; $("full").value = "";
+    show("approve", false); show("retry", true); show("draft", true);
+    setStatus("Description failed: " + item.error);
+  }
+
+  $("approve").onclick = async () => {
+    try {
+      const edits = {};
+      if ($("overview").value !== original.overview) edits.overview = $("overview").value;
+      if ($("full").value !== original.full_description) edits.full_description = $("full").value;
+      if (Object.keys(edits).length)
+        await api(`/items/${itemId}`, { method: "PATCH", headers: JSON_HDR, body: JSON.stringify(edits) });
+      await api(`/items/${itemId}/approve`, { method: "POST" });
+      resumeScanning("Approved. Show the next item");
+    } catch (e) { setStatus("Error: " + e.message); }
+  };
+
+  $("discard").onclick = async () => {
+    try {
+      await api(`/items/${itemId}/discard`, { method: "POST" });
+      resumeScanning("Discarded. Show the next item");
+    } catch (e) { setStatus("Error: " + e.message); }
+  };
+
+  $("retry").onclick = async () => {
+    try {
+      await api(`/items/${itemId}/retry`, { method: "POST" });
+      startProcessing(itemId);
+    } catch (e) { setStatus("Error: " + e.message); }
+  };
+
+  // ---------- start / stop ----------
+  $("start").onclick = async () => {
+    if (state === "scanning") {
+      state = "idle"; $("start").textContent = "Start scanning"; setStatus("Paused");
+      return;
+    }
+    if (state !== "idle") return;
+    try {
+      if (!$("video").srcObject) {
+        $("video").srcObject = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment" }, audio: false });
+      }
+      $("start").textContent = "Pause";
+      resumeScanning();
+    } catch (e) { setStatus("Camera error: " + e.message); }
+  };
+
+  setInterval(scanTick, SCAN_INTERVAL_MS);
+</script>
+</body>
+</html>
