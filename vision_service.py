@@ -336,17 +336,17 @@ def scan_frame(background: BackgroundTasks, session_id: str = Form(...), image: 
     if score < BLUR_MIN:
         return {"result": "rejected", "reason": "blurry", "blur_score": score}
 
-    # NEW: find the garment; from here on img is the cutout on white
     status, box = find_garment_box(client, MODEL, img)
+    print("garment box:", status, box)
     if status == "throttled":
-           return {"result": "cooldown"}
-    if status == "none":
-           return {"result": "no_garment"}
-    seg = segment(img, box)   # box is None if the lookup failed, which falls back to the old behavior
+        return {"result": "cooldown"}
+    # The live outline already saw a garment, so don't let a "none" from the model veto it.
+    seg = segment(img, box if status == "ok" else None)
     if seg is None:
-        return {"result": "no_garment"}
+        print("segment: no garment found (mask empty or under MIN_GARMENT_AREA)")
+        img.save(DATA / "debug_no_garment.jpg")
+        return {"result": "no_garment", "box_status": status}
     img, highlight = seg
-
     vec = embed(img)
     best_id, best_sim = None, 0.0
     for item_id, other in SESSION_EMB.get(session_id, []):
