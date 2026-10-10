@@ -1,4 +1,4 @@
-# Garment Vision Service
+# Bazaarly Vision Service
 
 Python 3.12 recommended (3.14 lacks some prebuilt packages).
 
