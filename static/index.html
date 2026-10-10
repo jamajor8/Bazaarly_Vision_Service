@@ -1,3 +1,21 @@
+
+/
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Index · HTML
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -24,11 +42,11 @@
   }
   h1 { margin: 0 0 12px; font-size: 1.25rem; font-weight: 650; letter-spacing: -0.01em; }
   h2 { margin: 0 0 10px; font-size: 1.05rem; font-weight: 650; }
-
+ 
   #stage { position: relative; overflow: hidden; border-radius: 12px; background: #0f1312; }
   #video { display: block; width: 100%; min-height: 220px; }
   #overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
-
+ 
   #statusbar { display: flex; align-items: center; gap: 10px; margin: 12px 0; min-height: 28px; }
   #dot { flex: none; width: 12px; height: 12px; border-radius: 50%; background: var(--line); }
   #statusbar[data-kind="ok"] #dot    { background: var(--signal); }
@@ -36,7 +54,7 @@
   #statusbar[data-kind="warn"] #dot  { background: var(--warn); }
   #statusbar[data-kind="error"] #dot { background: var(--error); }
   #status { font-weight: 600; }
-
+ 
   .panel {
     margin-top: 14px; padding: 14px;
     background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
@@ -47,7 +65,7 @@
     font: inherit; color: inherit; border: 1px solid var(--line); border-radius: 6px;
   }
   img.preview { display: block; max-width: 100%; max-height: 260px; margin: 0 0 8px; border-radius: 6px; background: #fff; }
-
+ 
   button {
     padding: 10px 16px; margin: 6px 6px 0 0;
     font: inherit; font-weight: 600; color: var(--ink);
@@ -65,16 +83,16 @@
 <body>
 <main>
   <h1>Garment scanner</h1>
-
+ 
   <div id="stage">
     <video id="video" autoplay playsinline muted></video>
     <canvas id="overlay"></canvas>
   </div>
   <canvas id="canvas" class="hidden"></canvas>
-
+ 
   <div id="statusbar" data-kind="idle"><span id="dot"></span><span id="status">Camera off</span></div>
   <button id="start" class="primary">Start scanning</button>
-
+ 
   <section id="dup" class="panel hidden">
     <h2>You may have scanned this already</h2>
     <img id="dupImg" class="preview" alt="Item scanned earlier">
@@ -82,7 +100,7 @@
     <button id="dupAdd">It's a different item. Add it</button>
     <button id="dupDismiss">Same item. Ignore</button>
   </section>
-
+ 
   <section id="draft" class="panel hidden">
     <h2>Review the description</h2>
     <img id="draftImg" class="preview" alt="Scanned garment">
@@ -94,7 +112,7 @@
     <button id="discard">Discard</button>
     <button id="retry" class="hidden">Retry description</button>
   </section>
-
+ 
   <details id="diag" class="panel">
     <summary>Diagnostics</summary>
     <button id="diagEcho">Test upload (echo)</button>
@@ -103,13 +121,17 @@
     <textarea id="diagOut" rows="14" readonly></textarea>
   </details>
 </main>
-
+ 
 <script>
   // ---------- settings ----------
-  const SCAN_INTERVAL_MS = 1500;   // how often a full frame goes to /scan/frame
+  const SCAN_INTERVAL_MS = 1500;   // minimum gap between photo attempts (only while the item is held still)
   const POLL_INTERVAL_MS = 1500;   // how often to check whether a description is ready
   const MAX_WIDTH = 1280;          // downscale full frames before sending
-
+ 
+  const STILL_MS = 2000;           // the garment must be in view and not moving this long before a photo is taken
+  const STILL_BOX = 0.03;          // outline edges may drift this much (fraction of the frame) and still count as still
+  const STILL_DIFF = 6;            // average pixel change inside the garment (0-255) that counts as movement
+ 
   const HL_INTERVAL_MS = 150;      // how often to ask the server for a fresh outline
   const FILL_ALPHA = 0.05;         // green fill strength inside the garment (raise for stronger green)
   const STALE_MS = 1500;           // hide the highlight if the server stops answering
@@ -117,7 +139,7 @@
   const SEARCH = 8;                // max motion per video frame, in tracking pixels
   const STRIDE = 2;                // sample every 2nd pixel inside the garment
   const MAX_ERR = 25;              // mean pixel difference above this = lost track, hold position
-
+ 
   // ---------- session and state ----------
   let sid = null;
   try { sid = localStorage.getItem("sid"); } catch (e) {}
@@ -125,30 +147,30 @@
     sid = Math.random().toString(36).slice(2) + Date.now().toString(36);
     try { localStorage.setItem("sid", sid); } catch (e) {}
   }
-
+ 
   let state = "idle";              // idle | scanning | duplicate | processing | review
   let busy = false;
   let pendingId = null, itemId = null, original = null;
-
+ 
   const $ = id => document.getElementById(id);
   const show = (id, on) => $(id).classList.toggle("hidden", !on);
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   const JSON_HDR = { "Content-Type": "application/json" };
-
+ 
   function setStatus(text, kind = "ok") {
     $("status").textContent = text;
     $("statusbar").dataset.kind = kind;
   }
-
+ 
   // ---------- API calls, with a request log for the diagnostics panel ----------
   const diag = { requests: [], echo: null, status: null };
-
+ 
   function logRequest(entry) {
     diag.requests.unshift(entry);
     diag.requests.length = Math.min(diag.requests.length, 15);
     renderDiag();
   }
-
+ 
   function describeBody(body) {
     if (body instanceof FormData) {
       return [...body.entries()].map(([k, v]) => v instanceof Blob
@@ -157,7 +179,7 @@
     }
     return typeof body === "string" ? body.slice(0, 120) : null;
   }
-
+ 
   async function api(path, opts = {}) {
     const t0 = performance.now();
     const quiet = (opts.method || "GET") === "GET" && path.startsWith("/items/");   // skip polling noise
@@ -177,16 +199,17 @@
       throw e;
     }
   }
-
+ 
   // ---------- panels ----------
   function resetPanels() { show("dup", false); show("draft", false); clearHighlight(); }
-
+ 
   function resumeScanning(msg) {
     resetPanels();
     state = "scanning";
-    setStatus(msg || "Scanning. Show an item", "ok");
+    lastAttempt = performance.now();   // keep the "Approved..." message visible for a moment
+    setStatus(msg || "Show an item to the camera", "ok");
   }
-
+ 
   // ---------- capture a full frame ----------
   function captureBlob() {
     const v = $("video"), c = $("canvas");
@@ -196,10 +219,12 @@
     c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
     return new Promise(r => c.toBlob(r, "image/jpeg", 0.9));
   }
-
+ 
+  // Sends one photo to the server. Called by the stillness gate (updateGate), not on a timer.
   async function scanTick() {
     if (state !== "scanning" || busy || !$("video").videoWidth) return;
     busy = true;   // never overlap requests
+    setStatus("Taking photo...", "busy");
     try {
       const form = new FormData();
       form.append("session_id", sid);
@@ -210,9 +235,10 @@
       setStatus("Error: " + e.message, "error");
     } finally {
       busy = false;
+      lastAttempt = performance.now();   // result messages stay visible for a moment
     }
   }
-
+ 
   function handleScan(res) {
     switch (res.result) {
       case "new_item":
@@ -229,10 +255,10 @@
       case "suppressed":
         setStatus("Same item still in view (already scanned)", "ok"); break;
       default:                       // cooldown
-        setStatus("Scanning. Show an item", "ok");
+        setStatus("Hold still...", "busy");
     }
   }
-
+ 
   // ---------- duplicate prompt ----------
   function showDuplicate(pid, existing) {
     state = "duplicate";
@@ -243,7 +269,7 @@
     show("dup", true);
     setStatus("Possible duplicate. Choose an option below", "warn");
   }
-
+ 
   async function resolveDup(action) {
     try {
       const res = await api(`/scan/pending/${pendingId}/resolve`,
@@ -255,7 +281,7 @@
   }
   $("dupAdd").onclick = () => resolveDup("add");
   $("dupDismiss").onclick = () => resolveDup("dismiss");
-
+ 
   // ---------- description and review ----------
   async function startProcessing(id) {
     resetPanels();
@@ -272,7 +298,7 @@
       await sleep(POLL_INTERVAL_MS);
     }
   }
-
+ 
   function showDraft(item) {
     state = "review";
     original = { overview: item.descriptions.overview, full_description: item.descriptions.full_description };
@@ -282,7 +308,7 @@
     show("approve", true); show("retry", false); show("draft", true);
     setStatus("Review the description, then approve", "ok");
   }
-
+ 
   function showError(item) {
     state = "review";
     $("overview").value = ""; $("full").value = "";
@@ -290,7 +316,7 @@
     show("approve", false); show("retry", true); show("draft", true);
     setStatus("Description failed: " + item.error, "error");
   }
-
+ 
   $("approve").onclick = async () => {
     try {
       const edits = {};
@@ -302,28 +328,36 @@
       resumeScanning("Approved. Show the next item");
     } catch (e) { setStatus("Error: " + e.message, "error"); }
   };
-
+ 
   $("discard").onclick = async () => {
     try {
       await api(`/items/${itemId}/discard`, { method: "POST" });
       resumeScanning("Discarded. Show the next item");
     } catch (e) { setStatus("Error: " + e.message, "error"); }
   };
-
+ 
   $("retry").onclick = async () => {
     try {
       await api(`/items/${itemId}/retry`, { method: "POST" });
       startProcessing(itemId);
     } catch (e) { setStatus("Error: " + e.message, "error"); }
   };
-
+ 
   // ---------- live highlight: server keyframes + per-frame tracking in the browser ----------
   let TH = 120;
-
+ 
   // cumX/cumY = total motion measured so far (tracking px). anchor = cum at the moment the
   // keyframe's source frame was captured, so (cum - anchor) = motion since that frame.
   const trk = { prev: null, pts: null, hl: null, cumX: 0, cumY: 0, anchorX: 0, anchorY: 0 };
-
+ 
+  // stillness gate: the photo is only taken after the garment has been in view and unmoving for STILL_MS
+  //   bbox  = outline bounding box when the timer started (movement = an edge drifts more than STILL_BOX)
+  //   ref   = grayscale frame when the timer started (movement = pixels inside the garment change)
+  //   since = when the current "holding still" period began
+  const still = { bbox: null, ref: null, since: 0 };
+  let lastAttempt = 0;       // when the last photo attempt (or result message) happened
+  let stillReady = false;    // true once the garment has been still long enough
+ 
   const hlCanvas = document.createElement("canvas");   // frames sent to the server
   const tCanvas = document.createElement("canvas");    // frames for tracking
   const tCtx = tCanvas.getContext("2d", { willReadFrequently: true });
@@ -331,23 +365,28 @@
   const rCtx = rCanvas.getContext("2d", { willReadFrequently: true });
   const SAD = new Float64Array((2 * SEARCH + 1) ** 2);
   let hlBusy = false;
-
+ 
   function syncTH() {
     const v = $("video");
     TH = Math.max(1, Math.round(TW * v.videoHeight / v.videoWidth));
   }
-
+ 
+  function resetStill() {
+    still.bbox = null; still.ref = null; still.since = 0; stillReady = false;
+  }
+ 
   function clearHighlight() {
     trk.hl = null; trk.pts = null; trk.prev = null;
+    resetStill();
     const o = $("overlay");
     o.getContext("2d").clearRect(0, 0, o.width, o.height);
   }
-
+ 
   // small grayscale copy of the current video frame
   function grabGray() {
     syncTH();
     if (tCanvas.width !== TW || tCanvas.height !== TH) {
-      tCanvas.width = TW; tCanvas.height = TH; trk.prev = null;
+      tCanvas.width = TW; tCanvas.height = TH; trk.prev = null; still.ref = null;
     }
     tCtx.drawImage($("video"), 0, 0, TW, TH);
     const d = tCtx.getImageData(0, 0, TW, TH).data;
@@ -355,7 +394,7 @@
     for (let i = 0, j = 0; i < d.length; i += 4, j++) g[j] = (d[i] * 77 + d[i + 1] * 150 + d[i + 2] * 29) >> 8;
     return g;
   }
-
+ 
   // list of (x, y) pixels inside the garment outline, at tracking resolution
   function rasterize(outline) {
     rCanvas.width = TW; rCanvas.height = TH;
@@ -372,7 +411,7 @@
         if (a[(y * TW + x) * 4 + 3] > 128) pts.push(x, y);
     return Int32Array.from(pts);
   }
-
+ 
   // how far did the garment move between prev and cur? (block matching with sub-pixel refinement)
   function estimateShift(prev, cur, pts, offX, offY) {
     const S = SEARCH, n = 2 * S + 1;
@@ -394,7 +433,7 @@
       }
     }
     if (used < 40) return null;
-
+ 
     // small penalty on big shifts, so flat (textureless) regions resolve to "no motion"
     let best = Infinity, bx = 0, by = 0;
     for (let y = -S; y <= S; y++) {
@@ -417,18 +456,50 @@
     const err = (best - used * 0.02 * (bx * bx + by * by)) / used;
     return { dx: bx + sx, dy: by + sy, err };
   }
-
+ 
+  // bounding box of an outline, as fractions of the frame: [x0, y0, x1, y1]
+  function bboxOf(outline) {
+    let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+    for (const [x, y] of outline) {
+      if (x < x0) x0 = x; if (y < y0) y0 = y;
+      if (x > x1) x1 = x; if (y > y1) y1 = y;
+    }
+    return [x0, y0, x1, y1];
+  }
+ 
+  // average brightness change inside the garment between two grayscale frames
+  function regionDiff(a, b, pts) {
+    let sum = 0, n = 0;
+    for (let i = 0; i < pts.length; i += 2) {
+      const k = pts[i + 1] * TW + pts[i];
+      const d = a[k] - b[k];
+      sum += d < 0 ? -d : d;
+      n++;
+    }
+    return n ? sum / n : 0;
+  }
+ 
+  // a fresh outline arrived: did the garment's silhouette move since the stillness timer started?
+  function noteStill(outline) {
+    const bb = bboxOf(outline), now = performance.now();
+    if (!still.bbox) { still.bbox = bb; still.ref = null; still.since = now; return; }
+    let moved = 0;
+    for (let i = 0; i < 4; i++) moved = Math.max(moved, Math.abs(bb[i] - still.bbox[i]));
+    if (moved > STILL_BOX) { still.bbox = bb; still.ref = null; still.since = now; }
+  }
+ 
   // a fresh outline arrived from the server
   function setKeyframe(hl, sentX, sentY) {
-    if (!hl) return clearHighlight();
+    if (!hl) return clearHighlight();   // no garment in view: the stillness timer restarts
     syncTH();
     const img = new Image();
     img.src = "data:image/png;base64," + hl.mask_png;
     trk.hl = { outline: hl.outline, img, at: performance.now() };
     trk.anchorX = sentX; trk.anchorY = sentY;   // motion since the frame was sent is applied automatically
     trk.pts = rasterize(hl.outline);
+    noteStill(hl.outline);
   }
-
+ 
   function renderHighlight() {
     const o = $("overlay"), v = $("video");
     if (o.width !== v.videoWidth || o.height !== v.videoHeight) { o.width = v.videoWidth; o.height = v.videoHeight; }
@@ -436,7 +507,7 @@
     ctx.clearRect(0, 0, o.width, o.height);
     const k = trk.hl;
     if (!k || performance.now() - k.at > STALE_MS) return;
-
+ 
     const sx = (trk.cumX - trk.anchorX) / TW * o.width;    // tracked motion since the keyframe
     const sy = (trk.cumY - trk.anchorY) / TH * o.height;
     if (k.img.complete && k.img.naturalWidth) {
@@ -450,32 +521,60 @@
       i ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
     });
     ctx.closePath();
-    ctx.strokeStyle = "rgb(0, 200, 120)";
+    ctx.strokeStyle = stillReady ? "rgb(0, 200, 120)" : "rgb(255, 170, 0)";   // amber while waiting, green when still
     ctx.lineWidth = Math.max(3, o.width / 200);
     ctx.stroke();
   }
-
+ 
+  // Decides when to take the photo: garment in view and unmoving for STILL_MS. Also updates the status text.
+  function updateGate(now) {
+    const fresh = !!(trk.hl && now - trk.hl.at < STALE_MS);
+    if (!fresh) resetStill();
+    stillReady = !!(fresh && still.bbox && now - still.since >= STILL_MS);
+ 
+    if (stillReady && !busy && now - lastAttempt >= SCAN_INTERVAL_MS) {
+      lastAttempt = now;
+      scanTick();
+      return;
+    }
+    if (!busy && now - lastAttempt > 2500) {    // don't overwrite the result of the last attempt
+      const msg = !fresh ? "Show an item to the camera"
+        : stillReady ? "Hold still..."
+        : `Hold still for ${(Math.max(0, STILL_MS - (now - still.since)) / 1000).toFixed(1)}s`;
+      if ($("status").textContent !== msg) setStatus(msg, stillReady ? "ok" : fresh ? "busy" : "idle");
+    }
+  }
+ 
   // runs once per new video frame (requestVideoFrameCallback), falling back to requestAnimationFrame
   function trackLoop() {
     const v = $("video");
     const next = cb => (v.requestVideoFrameCallback ? v.requestVideoFrameCallback(cb) : requestAnimationFrame(cb));
     const step = () => {
+      const now = performance.now();
       if (state !== "scanning") {
         if (trk.hl) clearHighlight();
-      } else if (v.videoWidth && trk.pts) {
-        const cur = grabGray();
-        if (trk.prev) {
-          const m = estimateShift(trk.prev, cur, trk.pts, trk.cumX - trk.anchorX, trk.cumY - trk.anchorY);
-          if (m && m.err < MAX_ERR) { trk.cumX += m.dx; trk.cumY += m.dy; }
+      } else if (v.videoWidth) {
+        if (trk.pts) {
+          const cur = grabGray();
+          if (trk.prev) {
+            const m = estimateShift(trk.prev, cur, trk.pts, trk.cumX - trk.anchorX, trk.cumY - trk.anchorY);
+            if (m && m.err < MAX_ERR) { trk.cumX += m.dx; trk.cumY += m.dy; }
+          }
+          trk.prev = cur;
+          // stillness check on pixels: compare with the frame from when the timer started
+          if (still.bbox && trk.hl && now - trk.hl.at < STALE_MS) {
+            if (!still.ref) still.ref = cur;
+            else if (regionDiff(still.ref, cur, trk.pts) > STILL_DIFF) { still.ref = cur; still.since = now; }
+          }
+          renderHighlight();
         }
-        trk.prev = cur;
-        renderHighlight();
+        updateGate(now);
       }
       next(step);
     };
     next(step);
   }
-
+ 
   // slow loop: ask the server for a fresh outline
   async function highlightTick() {
     const v = $("video");
@@ -494,7 +593,7 @@
     } catch (e) { /* the next tick retries */ }
     finally { hlBusy = false; }
   }
-
+ 
   // ---------- diagnostics panel ----------
   function envInfo() {
     const v = $("video");
@@ -508,12 +607,12 @@
       video: v.videoWidth ? `${v.videoWidth}x${v.videoHeight}` : "no video",
     };
   }
-
+ 
   function renderDiag() {
     $("diagOut").value = JSON.stringify(
       { env: envInfo(), echo: diag.echo, serverStatus: diag.status, recentRequests: diag.requests }, null, 2);
   }
-
+ 
   $("diagEcho").onclick = async () => {
     const form = new FormData();
     form.append("session_id", sid);
@@ -529,13 +628,13 @@
     catch (e) { diag.echo = { error: String(e) }; }
     renderDiag();
   };
-
+ 
   $("diagStatus").onclick = async () => {
     try { diag.status = await api("/debug/status"); }
     catch (e) { diag.status = { error: String(e) }; }
     renderDiag();
   };
-
+ 
   $("diagCopy").onclick = async () => {
     renderDiag();
     const out = $("diagOut");
@@ -544,7 +643,7 @@
     $("diagCopy").textContent = "Copied";
     setTimeout(() => { $("diagCopy").textContent = "Copy report"; }, 1500);
   };
-
+ 
   // ---------- start / pause ----------
   $("start").onclick = async () => {
     if (state === "scanning") {
@@ -568,12 +667,23 @@
       resumeScanning();
     } catch (e) { setStatus("Camera error: " + e.message, "error"); }
   };
-
+ 
   // ---------- go ----------
-  setInterval(scanTick, SCAN_INTERVAL_MS);
+  // photos are no longer taken on a timer: updateGate() takes one when the garment has held still
   setInterval(highlightTick, HL_INTERVAL_MS);
   trackLoop();
   renderDiag();
 </script>
 </body>
 </html>
+ 
+
+
+
+
+
+
+
+
+
+

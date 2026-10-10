@@ -32,6 +32,8 @@ from pillow_heif import register_heif_opener
 from pydantic import BaseModel, Field
 from sentence_transformers import SentenceTransformer
 from fastapi.middleware.cors import CORSMiddleware
+from skin_filter import remove_skin
+from garment_box import find_garment_box
 
 app = FastAPI(title="Bizzarly Vision Service")
 
@@ -151,7 +153,7 @@ def blur_score(img: Image.Image) -> float:
     gray = cv2.cvtColor(np.array(small), cv2.COLOR_RGB2GRAY)
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
 
-def segment(img: Image.Image):
+def segment(img: Image.Image, box=None):
     """Returns (cutout_on_white, highlight) or None if no garment-sized object is found.
     highlight = {"bbox": [x, y, w, h], "outline": [[x, y], ...]} with coordinates 0-1 of the original frame."""
     small = img.copy()
@@ -159,6 +161,14 @@ def segment(img: Image.Image):
     sw, sh = small.size
     mask = np.array(remove(small, session=seg_session, only_mask=True))
     binary = (mask > 128).astype(np.uint8)
+    if box:                                   # keep only what is inside the garment box
+           x0, y0, x1, y1 = box
+           pad = 0.03
+           keep = np.zeros_like(binary)
+           keep[int(max(0, y0 - pad) * sh):int(min(1, y1 + pad) * sh) + 1,
+                int(max(0, x0 - pad) * sw):int(min(1, x1 + pad) * sw) + 1] = 1
+           binary = binary * keep
+    binary = remove_skin(np.array(small), binary)
 
     # keep only the largest blob, so stray specks don't count
     n, labels, stats, _ = cv2.connectedComponentsWithStats(binary)
@@ -284,6 +294,7 @@ def segment_fast(img: Image.Image):
     sw, sh = small.size
     mask = np.array(remove(small, session=fast_session, only_mask=True))
     binary = (mask > 128).astype(np.uint8)
+    binary = remove_skin(np.array(small), binary)
 
     n, labels, stats, _ = cv2.connectedComponentsWithStats(binary)
     if n <= 1:
@@ -326,7 +337,12 @@ def scan_frame(background: BackgroundTasks, session_id: str = Form(...), image: 
         return {"result": "rejected", "reason": "blurry", "blur_score": score}
 
     # NEW: find the garment; from here on img is the cutout on white
-    seg = segment(img)
+    status, box = find_garment_box(client, MODEL, img)
+    if status == "throttled":
+           return {"result": "cooldown"}
+    if status == "none":
+           return {"result": "no_garment"}
+    seg = segment(img, box)   # box is None if the lookup failed, which falls back to the old behavior
     if seg is None:
         return {"result": "no_garment"}
     img, highlight = seg
