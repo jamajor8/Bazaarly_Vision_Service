@@ -65,7 +65,8 @@ MIN_GARMENT_AREA = 0.04                          # garment must fill at least 4%
 # Check AI Studio for the names available on your key's free tier.
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 DATA = Path("data"); DATA.mkdir(exist_ok=True)
-BLUR_MIN = 30.0          # Laplacian variance at 640px; below = too blurry. Tune: see "blur_score" in responses.
+# from my checking, my computer's blur value tends to be 5-6 when holding garment very still
+BLUR_MIN = 4.5          # Laplacian variance at 640px; below = too blurry. Tune: see "blur_score" in responses.
 DUP_THRESHOLD = 0.92     # cosine similarity; tune with same-item vs similar-item pairs.
 
 client = genai.Client()   # reads GEMINI_API_KEY (or GOOGLE_API_KEY) from the environment
@@ -206,6 +207,79 @@ def segment(img: Image.Image, box=None):
     return cut.crop(box), highlight
 
 
+# ---------- segment optimization ----------
+# Use the fast session for both highlight and full frames to maximize speed
+def segment_fast(img: Image.Image):
+    """Quick outline + green layer for the live overlay. Returns a highlight dict or None."""
+    small = img.copy()
+    small.thumbnail((320, 320))
+    sw, sh = small.size
+    mask = np.array(remove(small, session=fast_session, only_mask=True))
+    binary = (mask > 128).astype(np.uint8)
+    binary = remove_skin(np.array(small), binary)
+
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(binary)
+    if n <= 1:
+        return None
+    biggest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    binary = (labels == biggest).astype(np.uint8)
+    if binary.mean() < MIN_GARMENT_AREA:
+        return None
+
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    c = max(contours, key=cv2.contourArea)
+    c = cv2.approxPolyDP(c, 0.004 * cv2.arcLength(c, True), True)
+    outline = [[float(p[0][0]) / sw, float(p[0][1]) / sh] for p in c]
+
+    mw = 128
+    mh = max(1, round(mw * sh / sw))
+    layer = Image.new("RGBA", (mw, mh), (0, 200, 120, 255))
+    layer.putalpha(Image.fromarray(binary * 255).resize((mw, mh), Image.BILINEAR))
+    buf = io.BytesIO()
+    layer.save(buf, "PNG")
+    return {"outline": outline, "mask_png": base64.b64encode(buf.getvalue()).decode()}
+
+
+def segment_full(img: Image.Image):
+    """Fast full-res segmentation using fast_session (u2netp) - skips slow Gemini box call entirely."""
+    small = img.copy()
+    small.thumbnail((640, 640))
+    sw, sh = small.size
+    mask = np.array(remove(small, session=fast_session, only_mask=True))
+    binary = (mask > 128).astype(np.uint8)
+    binary = remove_skin(np.array(small), binary)
+
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(binary)
+    if n <= 1:
+        return None
+    biggest = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+    binary = (labels == biggest).astype(np.uint8)
+    if binary.mean() < MIN_GARMENT_AREA:
+        return None
+
+    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    c = max(contours, key=cv2.contourArea)
+    c = cv2.approxPolyDP(c, 0.003 * cv2.arcLength(c, True), True)
+    outline = [[float(p[0][0]) / sw, float(p[0][1]) / sh] for p in c]
+    x, y, w, h = cv2.boundingRect(binary)
+    highlight = {"bbox": [x / sw, y / sh, w / sw, h / sh], "outline": outline}
+
+    mw = 256
+    mh = max(1, round(mw * sh / sw))
+    layer = Image.new("RGBA", (mw, mh), (0, 200, 120, 255))
+    layer.putalpha(Image.fromarray(binary * 255).resize((mw, mh), Image.BILINEAR))
+    buf = io.BytesIO()
+    layer.save(buf, "PNG")
+    highlight["mask_png"] = base64.b64encode(buf.getvalue()).decode()
+
+    W, H = img.size
+    alpha = Image.fromarray(binary * 255).resize((W, H), Image.BILINEAR)
+    cut = Image.composite(img, Image.new("RGB", (W, H), "white"), alpha)
+    pad = 0.03
+    box = (max(0, int((x / sw - pad) * W)), max(0, int((y / sh - pad) * H)),
+           min(W, int(((x + w) / sw + pad) * W)), min(H, int(((y + h) / sh + pad) * H)))
+    return cut.crop(box), highlight
+
 def b64(img: Image.Image, max_side: int = 1568) -> str:
     img = img.copy(); img.thumbnail((max_side, max_side))
     buf = io.BytesIO(); img.save(buf, "JPEG", quality=90)
@@ -322,9 +396,10 @@ def segment_fast(img: Image.Image):
 def scan_highlight(image: UploadFile = File(...)):
     img = to_pil(image.file.read())
     return {"highlight": segment_fast(img)}    # null when no garment is in view
+
 @app.post("/scan/frame")
 def scan_frame(background: BackgroundTasks, session_id: str = Form(...), image: UploadFile = File(...)):
-    # One item at a time: ignore frames while a draft is being reviewed.
+    t_start = time.time()
     if session_id in ACTIVE:
         return {"result": "awaiting_approval", "item_id": ACTIVE[session_id]}
     if COOLDOWN.get(session_id, 0) > time.time():
@@ -336,16 +411,12 @@ def scan_frame(background: BackgroundTasks, session_id: str = Form(...), image: 
     if score < BLUR_MIN:
         return {"result": "rejected", "reason": "blurry", "blur_score": score}
 
-    status, box = find_garment_box(client, MODEL, img)
-    print("garment box:", status, box)
-    if status == "throttled":
-        return {"result": "cooldown"}
-    # The live outline already saw a garment, so don't let a "none" from the model veto it.
-    seg = segment(img, box if status == "ok" else None)
+    # Bypass Gemini find_garment_box entirely; use fast local segmentation
+    seg = segment_full(img)
     if seg is None:
         print("segment: no garment found (mask empty or under MIN_GARMENT_AREA)")
-        img.save(DATA / "debug_no_garment.jpg")
-        return {"result": "no_garment", "box_status": status}
+        return {"result": "no_garment", "box_status": "skipped_gemini"}
+
     img, highlight = seg
     vec = embed(img)
     best_id, best_sim = None, 0.0
@@ -353,26 +424,23 @@ def scan_frame(background: BackgroundTasks, session_id: str = Form(...), image: 
         sim = float(vec @ other)
         if sim > best_sim:
             best_id, best_sim = item_id, sim
+            
     if best_id and best_sim >= DUP_THRESHOLD:
-        # A question is already open for this session: don't spawn another one.
         if session_id in SESSION_PENDING:
-            return {"result": "awaiting_user", "pending_id": SESSION_PENDING[session_id],
-                    "highlight": highlight}                                   # NEW
-        # Vendor recently answered about this item and it's probably still in view.
+            return {"result": "awaiting_user", "pending_id": SESSION_PENDING[session_id], "highlight": highlight}
         if SUPPRESS.get((session_id, best_id), 0) > time.time():
-            return {"result": "suppressed", "possible_duplicate_of": best_id,
-                    "highlight": highlight}                                   # NEW
+            return {"result": "suppressed", "possible_duplicate_of": best_id, "highlight": highlight}
 
         pending_id = str(uuid.uuid4())
         path = DATA / f"pending_{pending_id}.jpg"
         img.save(path, "JPEG", quality=92)
         PENDING[pending_id] = {"session_id": session_id, "path": str(path),
-                               "duplicate_of": best_id, "similarity": best_sim}
+                             "duplicate_of": best_id, "similarity": best_sim}
         SESSION_PENDING[session_id] = pending_id
         existing = ITEMS[best_id]
         return {"result": "duplicate_pending", "pending_id": pending_id,
                 "similarity": best_sim,
-                "highlight": highlight,                                       # NEW
+                "highlight": highlight,
                 "existing_item": {
                     "item_id": best_id,
                     "image_url": f"/items/{best_id}/image/0",
@@ -380,8 +448,9 @@ def scan_frame(background: BackgroundTasks, session_id: str = Form(...), image: 
 
     item = create_item(session_id, img, vec, background,
                        duplicate_of=best_id if best_sim > 0.8 else None)
+    
     return {"result": "new_item", "item_id": item["item_id"], "status": "processing",
-            "highlight": highlight}                                           # NEW
+            "highlight": highlight}
 
 @app.post("/scan/pending/{pending_id}/resolve")
 def resolve_pending(pending_id: str, body: Resolution, background: BackgroundTasks):
